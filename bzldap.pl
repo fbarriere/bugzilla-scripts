@@ -10,7 +10,7 @@ bzldap.pl --ldapserver=<server-url> [options...]
 
 =head1 DESCRIPTION
 
-This script dumps users from a LDAP (or ActiveDirectory) server and 
+This script dumps users from a LDAP (or ActiveDirectory) server and
 creates the corresponding users into a bugzilla database.
 The script does not rely on any Bugzilla Perl module, it uses a straight
 connection to the database (so if the bugzilla DB changes, the script fails).
@@ -57,6 +57,8 @@ use Pod::Usage;
 use Data::Dumper;
 
 use Net::LDAP;
+use Net::LDAP::Control::Paged;
+use Net::LDAP::Constant qw( LDAP_CONTROL_PAGED );
 
 use Bugzilla;
 use Bugzilla::User;
@@ -81,7 +83,7 @@ my %default_log_config = (
 my $log_config_source = Log::Log4perl->init((-f "./.bzldaplogrc") ? "./.bzldaplogrc" : \%default_log_config);
 my $logger = Log::Log4perl::get_logger($tool_name);
 
-my $salt = "aBcDeFgH"; 
+my $salt = "aBcDeFgH";
 
 ###############################################################################
 # Command line switches:
@@ -271,9 +273,9 @@ my %config_cfg = (
 
 $logger->debug("ARGS: " . join("|", @ARGV));
 
-my $cfg = AppConfig->new({ 
-	CASE     => 1, 
-	CREATE   => 1, 
+my $cfg = AppConfig->new({
+	CASE     => 1,
+	CREATE   => 1,
 	PEDANTIC => 1,
 });
 $cfg->define(%config_cfg);
@@ -288,7 +290,7 @@ unless($cfg->args(\@ARGV) == 1) {
 
 if($cfg->get("cfgfile")) {
 		$logger->info("Loading parameters from file: " . $cfg->get("cfgfile"));
-		$cfg->file($cfg->get("cfgfile"));		
+		$cfg->file($cfg->get("cfgfile"));
 }
 
 unless($cfg->get("ldapserver")) {
@@ -310,7 +312,7 @@ if($cfg->get("verbose")) {
 	while($verbose_level > 0) {
 		$logger->more_logging();
 		$verbose_level--;
-	}	
+	}
 }
 $verbose_level = $cfg->get("verbose");
 
@@ -322,7 +324,7 @@ if($cfg->get("quiet")) {
 	while($quiet_level > 0) {
 		$logger->less_logging();
 		$quiet_level--;
-	}	
+	}
 }
 $quiet_level = $cfg->get("quiet");
 
@@ -332,13 +334,79 @@ $quiet_level = $cfg->get("quiet");
 
 sub _check_ldap_answer {
 	my ($answer) = @_;
-	
+
 	unless($answer) {
 		$logger->logdie("UNKNWON ERROR");
 	}
-	
+
 	if($answer->is_error()) {
 		$logger->logdie("LDAP FAILURE: ", $answer->error_text());
+	}
+}
+
+sub lookup_update {
+	my ($ldapuser, $added, $skipped, $invalids) = @_;
+
+	#
+	# For each LDAP user, look for a user in Bugzilla with the same Email address.
+	# extern_id
+
+	my $usermail = $ldapuser->get_value($cfg->get("ldapmail"));
+	my $userid   = $ldapuser->get_value($cfg->get("ldapuid"));
+	my $username = $ldapuser->get_value($cfg->get("ldapname"));
+
+	$logger->debug("Looking for: '$usermail'");
+
+	my $bzuser = Bugzilla::Object::match("Bugzilla::User", {login_name => "$usermail"});
+	scalar(@{$bzuser}) <= 1 or $logger->logdie("Error, more than 1 user match: \n" . dumper($bzuser));
+
+	$logger->debug("Found: \n" . Dumper($bzuser));
+
+	if($bzuser && scalar(@{$bzuser}) > 0) {
+		$cfg->get("reportall") && $logger->info("Already defined: $usermail ($userid / $username)");
+		${$skipped}++;
+	}
+	else {
+		$bzuser = Bugzilla::Object::match("Bugzilla::User", {'extern_id' => "$userid"});
+		scalar(@{$bzuser}) <= 1 or $logger->logdie("Error, more than 1 user match: \n" . dumper($bzuser));
+
+		if($bzuser && scalar(@{$bzuser}) > 0) {
+			$logger->debug("Found: \n" . Dumper($bzuser));
+			$logger->error("External user already defined with different ID.");
+			$logger->error("   In LDAP: id=$userid, mail=$usermail, name=$username");
+			$logger->error("   In BZ  : id=" . $bzuser->[0]->login . ", mail=" . $bzuser->[0]->email . ", name=" . $bzuser->[0]->name);
+
+			unless($cfg->get("norun") || $cfg->get("noupdate")) {
+				$logger->info("Updating user '$username'");
+				$bzuser->[0]->set_login("$usermail");
+				$bzuser->[0]->set_name("$username");
+				$bzuser->[0]->update();
+			}
+		}
+		else {
+			$logger->warn("Creating new user: $usermail ($userid / $username)");
+			unless($cfg->get("norun")) {
+				if ( $usermail =~ /^[\w\.\-]+@[\w\.\-]+$/ ) {
+					my $nu = Bugzilla::User->create({
+						login_name    => "$usermail",
+						realname      => "$username",
+						cryptpassword => '*',
+						extern_id     => "$userid",
+					});
+					if ( not $nu ) {
+						 $logger->error("failed to create user: '$userid/$usermail'");
+					}
+					else {
+						$nu->update();
+					}
+				}
+				else {
+					$logger->error("Invalid user name/mail: '$usermail'");
+					push(@{$invalids}, $usermail);
+				}
+			}
+			${$added}++;
+		}
 	}
 }
 
@@ -346,16 +414,18 @@ sub _check_ldap_answer {
 # LDAP dump:
 ###############################################################################
 
+Bugzilla->usage_mode(Bugzilla::Constants::USAGE_MODE_CMDLINE);
+
 $logger->info(
-	"Connecting to: " . 
-	$cfg->get("ldapserver") . 
-	" (" .  
-	$cfg->get("ldapport") . 
+	"Connecting to: " .
+	$cfg->get("ldapserver") .
+	" (" .
+	$cfg->get("ldapport") .
 	")"
 );
 
 my $ldap = Net::LDAP->new(
-	$cfg->get("ldapserver"), 
+	$cfg->get("ldapserver"),
 	port => $cfg->get("ldapport"),
 ) or $logger->logdie("$@");
 
@@ -369,7 +439,7 @@ my $mesg;
 if($cfg->get("binduser")) {
 	$logger->info("Connecting to LDAP/AD server as: " . $cfg->get("binduser"));
 	$mesg = $ldap->bind(
-		$cfg->get("binduser"), 
+		$cfg->get("binduser"),
 		password => $cfg->get("bindpass")
 	);
 }
@@ -398,103 +468,61 @@ my $attrlist = [
 	$cfg->get("ldapmail"),
 ];
 
-if($cfg->get('allattr')) {
-	$mesg = $ldap->search(
-		base   => $cfg->get("basedn"),
-		filter => $cfg->get("ldapfilter"),
-		sizelimit => 0,
-	);
-}
-else {
-	$mesg = $ldap->search(
-		base   => $cfg->get("basedn"),
-		filter => $cfg->get("ldapfilter"),
-		sizelimit => 0,
-		attrs => $attrlist,
-	);
-}
-
-_check_ldap_answer($mesg);
-
-if($mesg->count() > 0) {
-	$logger->info("Search returned: ", $mesg->count(), " matches");
-}
-else {
-	$logger->logdie("Search returned no result.");
-}
-
-#
-# If we just want to dump the LDAP result:
-#
-if($cfg->get('dumponly')) {
-	foreach my $ldapuser ($mesg->entries) {
-		$logger->info(
-			"*********************" . 
-			$ldapuser->get_value($cfg->get("ldapuid")) . 
-			"******************************"
-		);
-		$ldapuser->dump;
-	}
-	$logger->info("***************************************************************");
-	exit;
-}
-
-#
-# For each LDAP user, look for a user in Bugzilla with the same Email address.
-# extern_id
-$logger->info("Looking for LDAP user in Bugzilla'a database.");
-
+my $page = Net::LDAP::Control::Paged->new(size => 999);
+my $cookie;
+my $processed=0;
 my $added=0;
 my $skipped=0;
+my @invalidusers = ();
 
-foreach my $ldapuser ($mesg->entries) {
-	my $usermail = $ldapuser->get_value($cfg->get("ldapmail"));
-	my $userid   = $ldapuser->get_value($cfg->get("ldapuid"));
-	my $username = $ldapuser->get_value($cfg->get("ldapname"));
-	
-	$logger->debug("Looking for: '$usermail'");
-	
-	my $bzuser = Bugzilla::Object::match("Bugzilla::User", {login_name => "$usermail"});
-	scalar(@{$bzuser}) <= 1 or $logger->logdie("Error, more than 1 user match: \n" . dumper($bzuser));
-	
-	$logger->debug("Found: \n" . Dumper($bzuser));
-	
-	if($bzuser && scalar(@{$bzuser}) > 0) {
-		$cfg->get("reportall") && $logger->info("Already defined: $usermail ($userid / $username)");
-		$skipped++;
+while (1) {
+	if($cfg->get('allattr')) {
+		$mesg = $ldap->search(
+			base   => $cfg->get("basedn"),
+			filter => $cfg->get("ldapfilter"),
+			control => [$page]
+		);
 	}
 	else {
-		$bzuser = Bugzilla::Object::match("Bugzilla::User", {'extern_id' => "$userid"});
-		scalar(@{$bzuser}) <= 1 or $logger->logdie("Error, more than 1 user match: \n" . dumper($bzuser));
+		$mesg = $ldap->search(
+			base   => $cfg->get("basedn"),
+			filter => $cfg->get("ldapfilter"),
+			attrs => $attrlist,
+			control => [$page]
+		);
+	}
 
-		if($bzuser && scalar(@{$bzuser}) > 0) {
-			$logger->debug("Found: \n" . Dumper($bzuser));
-			$logger->error("External user already defined with different ID.");
-			$logger->error("   In LDAP: id=$userid, mail=$usermail, name=$username");
-			$logger->error("   In BZ  : id=" . $bzuser->[0]->login . ", mail=" . $bzuser->[0]->email . ", name=" . $bzuser->[0]->name);
-			
-			unless($cfg->get("norun") || $cfg->get("noupdate")) {
-				$logger->info("Updating user '$username'");
-				$bzuser->[0]->set_login("$usermail");
-				$bzuser->[0]->set_name("$username");
-				$bzuser->[0]->update();
-			}
-			
+	_check_ldap_answer($mesg);
+
+	while (my $adentry = $mesg->pop_entry()) {
+		$processed++;
+
+		if($cfg->get('dumponly')) {
+			$logger->info(
+				"*********************" .
+				$adentry->get_value($cfg->get("ldapuid")) .
+				"******************************"
+			);
+			$adentry->dump;
+			$logger->info("***************************************************************");
 		}
 		else {
-			$logger->warn("Creating new user: $usermail ($userid / $username)");
-			unless($cfg->get("norun")) {
-				Bugzilla::User->create({
-					login_name    => "$usermail",
-					realname      => "$username",
-					cryptpassword => '*',
-					extern_id     => "$userid",
-				}) or logger->logdie("failed to create user: '$userid/$usermail'");
-			}
-			$added++;
+			lookup_update($adentry, \$added, \$skipped, \@invalidusers)
 		}
 	}
-	
+
+	my ($resp) = $mesg->control(LDAP_CONTROL_PAGED) or last;
+	$cookie    = $resp->cookie or last;
+	# Paging Control
+	$page->cookie($cookie);
+}
+
+if ($cookie) {
+	# Abnormal exit, so let the server know we do not want any more
+	$page->cookie($cookie);
+	$page->size(0);
+	$ldap->search(control => [$page]);
+	$logger->logdie("abnormal exit");
 }
 
 #
@@ -502,8 +530,10 @@ foreach my $ldapuser ($mesg->entries) {
 #
 $ldap->unbind();
 
+$logger->info("Processed $processed users");
 $logger->info("Added $added new users");
 $logger->info("Skipped $skipped already defined users");
-
-
-
+$logger->info("Dropped " . scalar(@invalidusers) . " invalid users");
+foreach my $invalid ( @invalidusers ) {
+	$logger->info("   Invalid address: '$invalid'");
+}
