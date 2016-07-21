@@ -54,12 +54,12 @@ use Log::Log4perl::Layout;
 
 use AppConfig;
 use Pod::Usage;
-
-use Digest;
+use Data::Dumper;
 
 use Net::LDAP;
 
-use DBI;
+use Bugzilla;
+use Bugzilla::User;
 
 ###############################################################################
 # Constants:
@@ -139,37 +139,6 @@ Default is 'email'.
 The name of the LDAP attribute used to store the full name.
 Default value is 'sn'.
 
-=item --defaultpass=<password>
-
-Default password to set in Bugzilla for the created users. Should not be
-very important as the authentication will be made against LDAP/AD (unless
-you want to authenticate against the Bugzilla database and only sync it with
-your LDAP server).
-
-=item --passcrypt=<password-algorythm>
-
-Password algorythm to use. by default SHA-256 (default for bugzilla 4.x).
-
-=item --dbhost=<database-host>
-
-Name of the host the database server is running on. default is 'localhost'
-
-=item --dbport=<port-number>
-
-Port number the database server is connected to.
-
-=item --dbuser=<user-name>
-
-Name of the user to connect to the database server.
-
-=item --dbpass=<password>
-
-Password to use to connect to the database.
-
-=item --dbname=<database-name>
-
-The name of the database used by the bugzilla instance. By default; 'bugzilla'
-
 =item --cfgfile=<configfile>
 
 Load command line switches from a config file. The format is the format used
@@ -196,6 +165,11 @@ Without this option, only the added users are reported.
 =item --norun
 
 Simulate the run, and do not insert the new users in the database.
+
+=item --noupdate
+
+Do not update users description that mismatch between LDAP and Bugzilla.
+Just report them as errors.
 
 =item --help
 
@@ -254,42 +228,12 @@ my %config_cfg = (
 		ARGS     => '=s',
 		ARGCOUNT => AppConfig::ARGCOUNT_ONE,
 	},
-	'defaultpass' => {
-		DEFAULT  => 'password',
-		ARGS     => '=s',
-		ARGCOUNT => AppConfig::ARGCOUNT_ONE,
-	},
-	'passcrypt' => {
-		DEFAULT  => 'SHA-256',
-		ARGS     => '=s',
-		ARGCOUNT => AppConfig::ARGCOUNT_ONE,
-	},
-	'dbhost' => {
-		DEFAULT  => 'localhost',
-		ARGS     => '=s',
-		ARGCOUNT => AppConfig::ARGCOUNT_ONE,
-	},
-	'dbport' => {
-		DEFAULT  => undef,
-		ARGS     => '=s',
-		ARGCOUNT => AppConfig::ARGCOUNT_ONE,
-	},
-	'dbuser' => {
-		DEFAULT  => undef,
-		ARGS     => '=s',
-		ARGCOUNT => AppConfig::ARGCOUNT_ONE,
-	},
-	'dbpass' => {
-		DEFAULT  => undef,
-		ARGS     => '=s',
-		ARGCOUNT => AppConfig::ARGCOUNT_ONE,
-	},
-	'dbname' => {
-		DEFAULT  => 'bugzilla',
-		ARGS     => '=s',
-		ARGCOUNT => AppConfig::ARGCOUNT_ONE,
-	},
 	'verbose' => {
+		DEFAULT  => 0,
+		ARGS     => '+',
+		ARGCOUNT => AppConfig::ARGCOUNT_NONE,
+	},
+	'quiet' => {
 		DEFAULT  => 0,
 		ARGS     => '+',
 		ARGCOUNT => AppConfig::ARGCOUNT_NONE,
@@ -307,6 +251,10 @@ my %config_cfg = (
 		ARGCOUNT => AppConfig::ARGCOUNT_NONE,
 	},
 	'norun' => {
+		DEFAULT  => 0,
+		ARGCOUNT => AppConfig::ARGCOUNT_NONE,
+	},
+	'noupdate' => {
 		DEFAULT  => 0,
 		ARGCOUNT => AppConfig::ARGCOUNT_NONE,
 	},
@@ -365,6 +313,18 @@ if($cfg->get("verbose")) {
 	}	
 }
 $verbose_level = $cfg->get("verbose");
+
+my $quiet_level;
+
+if($cfg->get("quiet")) {
+	$quiet_level = $cfg->get("quiet");
+	$logger->info("Decreasing verbosity by: $quiet_level");
+	while($quiet_level > 0) {
+		$logger->less_logging();
+		$quiet_level--;
+	}	
+}
+$quiet_level = $cfg->get("quiet");
 
 ###############################################################################
 # Utilities:
@@ -480,55 +440,8 @@ if($cfg->get('dumponly')) {
 }
 
 #
-# Connect to the Bugzilla database server:
-#
-$logger->info("Connecting to Bugzilla database server.");
-$logger->info("   Server host...: " . $cfg->get("dbhost"));
-$logger->info("   Server port...: " . $cfg->get("dbport"));
-$logger->info("   User name.....: " . $cfg->get("dbuser"));
-$logger->info("   Database name.: " . $cfg->get("dbname"));
-
-my $datasource = 
-	"dbi:mysql:" .
-	"database=" . $cfg->get("dbname") .
-	";host=" . $cfg->get("dbhost") .
-	";port=" . $cfg->get("dbport")
-;
-
-my $dbh = DBI->connect(
-	$datasource,
-	$cfg->get("dbuser"),
-	$cfg->get("dbpass"),
-) or $logger->logdie("Database connection failed: " . $DBI::errstr);
-
-my $findsth = $dbh->prepare(
-	"SELECT * FROM profiles WHERE login_name=?"
-) or $logger->logdie("Prepare failed: " . $DBI::errstr);
-
-my $verifsth = $dbh->prepare(
-	"SELECT * FROM profiles WHERE extern_id=?"
-) or $logger->logdie("Prepare failed: " . $DBI::errstr);
-
-#
-# Generate the default password once for all, then prepare the insert
-# statement.
-#
-my $hasher = new Digest($cfg->get("passcrypt"));
-
-$hasher->add($cfg->get("defaultpass"), "$salt");
-
-my $encryptedpass = 
-	"$salt" .
-	$hasher->b64digest .
-	"{" . $cfg->get("passcrypt") . "}";
-
-my $insertsth = $dbh->prepare(
-	"INSERT INTO profiles VALUES ('', ?, '$encryptedpass', ?, '', 0, 1, ?);"
-);
-
-#
 # For each LDAP user, look for a user in Bugzilla with the same Email address.
-#
+# extern_id
 $logger->info("Looking for LDAP user in Bugzilla'a database.");
 
 my $added=0;
@@ -539,41 +452,54 @@ foreach my $ldapuser ($mesg->entries) {
 	my $userid   = $ldapuser->get_value($cfg->get("ldapuid"));
 	my $username = $ldapuser->get_value($cfg->get("ldapname"));
 	
-	$logger->debug("Looking for: $usermail");
-	$findsth->execute($usermail) or $logger->logdie("Select failed: " . $DBI::errstr);
-	my $userh = $findsth->fetchall_hashref('login_name');
+	$logger->debug("Looking for: '$usermail'");
 	
-	if($userh && keys %{$userh}) {
+	my $bzuser = Bugzilla::Object::match("Bugzilla::User", {login_name => "$usermail"});
+	scalar(@{$bzuser}) <= 1 or $logger->logdie("Error, more than 1 user match: \n" . dumper($bzuser));
+	
+	$logger->debug("Found: \n" . Dumper($bzuser));
+	
+	if($bzuser && scalar(@{$bzuser}) > 0) {
 		$cfg->get("reportall") && $logger->info("Already defined: $usermail ($userid / $username)");
 		$skipped++;
 	}
 	else {
-		#
-		# Verify a user with the saem extern_id does not already exist before creating
-		#
-		$verifsth->execute($userid) or $logger->logdie("Select failed: " . $DBI::errstr);
-		my $verifh = $verifsth->fetchall_hashref('extern_id');
-		if($verifh && keys %{$verifh}) {
-			$logger->error("User with external ID '$userid' already defined in the database.");
-			$logger->error("   This user should be: '$userid' '$usermail' '$username'");
-			$logger->error("   But is defined as..: '$userid'" . 
-				" '" . $verifh->{$userid}->{'login_name'} . "'" .
-				" '" . $verifh->{$userid}->{'realname'} . "'"
-			);
-			$skipped++;
+		$bzuser = Bugzilla::Object::match("Bugzilla::User", {'extern_id' => "$userid"});
+		scalar(@{$bzuser}) <= 1 or $logger->logdie("Error, more than 1 user match: \n" . dumper($bzuser));
+
+		if($bzuser && scalar(@{$bzuser}) > 0) {
+			$logger->debug("Found: \n" . Dumper($bzuser));
+			$logger->error("External user already defined with different ID.");
+			$logger->error("   In LDAP: id=$userid, mail=$usermail, name=$username");
+			$logger->error("   In BZ  : id=" . $bzuser->[0]->login . ", mail=" . $bzuser->[0]->email . ", name=" . $bzuser->[0]->name);
+			
+			unless($cfg->get("norun") || $cfg->get("noupdate")) {
+				$logger->info("Updating user '$username'");
+				$bzuser->[0]->set_login("$usermail");
+				$bzuser->[0]->set_name("$username");
+				$bzuser->[0]->update();
+			}
+			
 		}
 		else {
-			$logger->info("Creating new user: $usermail ($userid / $username)");
-			$cfg->get("norun") || $insertsth->execute("$usermail", "$username", "$userid") or $logger->logdie("Insert failed: " . $DBI::errstr);
+			$logger->warn("Creating new user: $usermail ($userid / $username)");
+			unless($cfg->get("norun")) {
+				Bugzilla::User->create({
+					login_name    => "$usermail",
+					realname      => "$username",
+					cryptpassword => '*',
+					extern_id     => "$userid",
+				}) or logger->logdie("failed to create user: '$userid/$usermail'");
+			}
 			$added++;
 		}
 	}
+	
 }
 
 #
 # Unbind, disconnect and say goodbye...
 #
-$dbh->disconnect();
 $ldap->unbind();
 
 $logger->info("Added $added new users");
