@@ -1,8 +1,0 @@
-
-Description:
-===========
-
-   Various scripts I wrote to help me manage Bugzilla instances...
-The first one is (yet another) LDAP users download script. It's written in Perl, and is
-tailored to my specific needs...
-
