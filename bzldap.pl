@@ -265,6 +265,11 @@ my %config_cfg = (
 		ARGS     => '=s',
 		ARGCOUNT => AppConfig::ARGCOUNT_ONE,
 	},
+	'localuser' => {
+		DEFAULT => undef,
+		ARGS    => '=s@',
+		ARGCOUNT => AppConfig::ARGCOUNT_LIST,
+	},
 	'help' => {
 		DEFAULT  => 0,
 		ARGCOUNT => AppConfig::ARGCOUNT_NONE,
@@ -354,7 +359,7 @@ sub lookup_update {
 	my $usermail = $ldapuser->get_value($cfg->get("ldapmail"));
 	my $userid   = $ldapuser->get_value($cfg->get("ldapuid"));
 	my $username = $ldapuser->get_value($cfg->get("ldapname"));
-
+	
 	$logger->debug("Looking for: '$usermail'");
 
 	my $bzuser = Bugzilla::Object::match("Bugzilla::User", {login_name => "$usermail"});
@@ -470,7 +475,7 @@ my $attrlist = [
 
 my $page = Net::LDAP::Control::Paged->new(size => 999);
 my $cookie;
-my $processed=0;
+my @processed=();
 my $added=0;
 my $skipped=0;
 my @invalidusers = ();
@@ -495,7 +500,7 @@ while (1) {
 	_check_ldap_answer($mesg);
 
 	while (my $adentry = $mesg->pop_entry()) {
-		$processed++;
+		push(@processed, $adentry->get_value($cfg->get("ldapmail")));
 
 		if($cfg->get('dumponly')) {
 			$logger->info(
@@ -530,7 +535,28 @@ if ($cookie) {
 #
 $ldap->unbind();
 
-$logger->info("Processed $processed users");
+$logger->info("Checking Bugzilla users database (find disabled users)");
+
+my $localusers = $cfg->get("localuser");
+
+foreach my $bu (Bugzilla::User->get_all()) {
+	my $username = $bu->email();
+	$logger->info("Looking for user: $username");
+	if(grep(/^$username/, @processed)) {
+		$logger->info("   found...");
+	}
+	elsif(grep(/^$username/, @$localusers)) {
+		$logger->info("   local user, skipping.");
+	}
+	elsif($bu->disabledtext()) {
+		$logger->info("   Already disabled");
+	}
+	else {
+		$logger->warn("   NOT FOUND: disable it");
+	}
+}
+
+$logger->info("Processed " . scalar(@processed) . " users");
 $logger->info("Added $added new users");
 $logger->info("Skipped $skipped already defined users");
 $logger->info("Dropped " . scalar(@invalidusers) . " invalid users");
