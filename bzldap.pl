@@ -500,7 +500,7 @@ while (1) {
 	_check_ldap_answer($mesg);
 
 	while (my $adentry = $mesg->pop_entry()) {
-		push(@processed, $adentry->get_value($cfg->get("ldapmail")));
+		push(@processed, lc($adentry->get_value($cfg->get("ldapmail")));
 
 		if($cfg->get('dumponly')) {
 			$logger->info(
@@ -537,12 +537,12 @@ $ldap->unbind();
 
 $logger->info("Checking Bugzilla users database (find disabled users)");
 
-my $localusers = $cfg->get("localuser");
+my $localusers = lc($cfg->get("localuser"));
 
 foreach my $bu (Bugzilla::User->get_all()) {
-	my $username = $bu->email();
-	if(not grep(/^$username/i, @processed)) {
-		if(grep(/^$username/i, @$localusers)) {
+	my $username = lc($bu->email());
+	if(not grep(/^$username/, @processed)) {
+		if(grep(/^$username/, @$localusers)) {
 			$logger->info("Skipping local-only user: '$username'.");
 		}
 		elsif($bu->disabledtext()) {
