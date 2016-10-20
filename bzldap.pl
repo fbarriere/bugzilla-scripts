@@ -500,7 +500,7 @@ while (1) {
 	_check_ldap_answer($mesg);
 
 	while (my $adentry = $mesg->pop_entry()) {
-		push(@processed, lc($adentry->get_value($cfg->get("ldapmail")));
+		push(@processed, lc($adentry->get_value($cfg->get("ldapmail"))));
 
 		if($cfg->get('dumponly')) {
 			$logger->info(
