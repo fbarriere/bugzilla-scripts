@@ -541,18 +541,16 @@ my $localusers = $cfg->get("localuser");
 
 foreach my $bu (Bugzilla::User->get_all()) {
 	my $username = $bu->email();
-	$logger->info("Looking for user: $username");
-	if(grep(/^$username/, @processed)) {
-		$logger->info("   found...");
-	}
-	elsif(grep(/^$username/, @$localusers)) {
-		$logger->info("   local user, skipping.");
-	}
-	elsif($bu->disabledtext()) {
-		$logger->info("   Already disabled");
-	}
-	else {
-		$logger->warn("   NOT FOUND: disable it");
+	if(not grep(/^$username/i, @processed)) {
+		if(grep(/^$username/i, @$localusers)) {
+			$logger->info("Skipping local-only user: '$username'.");
+		}
+		elsif($bu->disabledtext()) {
+			$logger->info("User '$username', already disabled");
+		}
+		else {
+			$logger->warn("User '$username' not found; Disable it.");
+		}
 	}
 }
 
