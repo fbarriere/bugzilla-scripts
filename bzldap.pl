@@ -96,55 +96,14 @@ my $salt = "aBcDeFgH";
 
 =over 4
 
-=item --ldapserver=<server-url>
-
-The URL (or IP) of the LDAP/AD server to dump.
-
-=item --ldapport=<port-number>
-
-The port of the LDAP/AD server. 389 by default.
-
-=item --binduser=<user-name>
-
-The name of the user to use to bind to the server.
-If unset, the bind will be anonymous.
-
-=item --bindpass=<password>
-
-The password for the bind. Necessary is a user name has been
-provided (so the bind is not anonymous).
-
-=item --basedn=<base-dn>
-
-Base DN for the search. the search is done according to the
-LDAP filter and down through the tree.
-
-=item --ldapfilter=<filter-string>
-
-The LDAP filter to apply in order to sort/reduce the search
-base. Can be usefull to only search among real users, or
-only among active users.
-The format is the LDAP filter format as defined in the RFC...
-
-=item --ldapuid=<uid-attribute>
-
-The name of the UID attribute in the LDAP schema. By default 'uid',
-should be sAMAccountName for ActiveDirectory.
-
-=item --ldapmail=<email-attribute>
-
-The name of the LDAP aatribute that stores the Email address.
-Default is 'email'.
-
-=item --ldapname=<name-attribute>
-
-The name of the LDAP attribute used to store the full name.
-Default value is 'sn'.
-
 =item --cfgfile=<configfile>
 
 Load command line switches from a config file. The format is the format used
 by AppConfig (<switch-name> = <value>, one per line, without the double dash).
+
+=item --ldapcfg=<configfile>
+
+Load LDAP settings from the config file. There must one per LDAP server.
 
 =item --dumponly
 
@@ -184,7 +143,7 @@ Increase verbosity...
 =cut
 #####
 
-my %config_cfg = (
+my %ldap_cfg = (
 	'ldapserver' => {
 		DEFAULT  => undef,
 		ARGS     => '=s',
@@ -235,6 +194,9 @@ my %config_cfg = (
 		ARGS     => '=i',
 		ARGCOUNT => AppConfig::ARGCOUNT_ONE,
 	},
+);
+
+my %config_cfg = (
 	'verbose' => {
 		DEFAULT  => 0,
 		ARGS     => '+',
@@ -270,6 +232,11 @@ my %config_cfg = (
 		ARGS     => '=s',
 		ARGCOUNT => AppConfig::ARGCOUNT_ONE,
 	},
+	'ldapcfg' => {
+		DEFAULT  => undef,
+		ARGS     => '=s@',
+		ARGCOUNT => AppConfig::ARGCOUNT_LIST,
+	},
 	'localuser' => {
 		DEFAULT => undef,
 		ARGS    => '=s@',
@@ -303,7 +270,7 @@ if($cfg->get("cfgfile")) {
 		$cfg->file($cfg->get("cfgfile"));
 }
 
-unless($cfg->get("ldapserver")) {
+unless($cfg->get("ldapcfg")) {
 	pod2usage({
 		-message => "\n",
 		-exitval => -1,
@@ -355,15 +322,15 @@ sub _check_ldap_answer {
 }
 
 sub lookup_update {
-	my ($ldapuser, $added, $skipped, $invalids) = @_;
+	my ($ldapuser, $added, $skipped, $invalids, $ldapcfg) = @_;
 
 	#
 	# For each LDAP user, look for a user in Bugzilla with the same Email address.
 	# extern_id
 
-	my $usermail = $ldapuser->get_value($cfg->get("ldapmail"));
-	my $userid   = $ldapuser->get_value($cfg->get("ldapuid"));
-	my $username = $ldapuser->get_value($cfg->get("ldapname"));
+	my $usermail = $ldapuser->get_value($ldapcfg->get("ldapmail"));
+	my $userid   = $ldapuser->get_value($ldapcfg->get("ldapuid"));
+	my $username = $ldapuser->get_value($ldapcfg->get("ldapname"));
 	
 	$logger->debug("Looking for: '$usermail'");
 
@@ -408,6 +375,7 @@ sub lookup_update {
 					}
 					else {
 						$nu->update();
+						${$added}++;
 					}
 				}
 				else {
@@ -415,9 +383,36 @@ sub lookup_update {
 					push(@{$invalids}, $usermail);
 				}
 			}
-			${$added}++;
 		}
 	}
+}
+
+sub ldap_connect {
+	my ($server, $port, $user, $password) = @_;
+	
+	$logger->info("Connecting to: server '$server' ($port)");
+	
+	my $ldap = Net::LDAP->new($server, port => $port) or $logger->logdie("$@");
+	
+	#
+	# LDAP bind: named or anonymous bind.
+	#
+	# \TODO: not tested with anonymous bind.
+	#
+	my $mesg;
+	
+	if($user) {
+		$logger->info("Connecting to LDAP/AD server as: '$user'");
+		$mesg = $ldap->bind($user, password => $password);
+	}
+	else {
+		$logger->info("Connecting to LDAP/AD server anonymously");
+		$mesg = $ldap->bind();
+	}
+	
+	_check_ldap_answer($mesg);
+		
+	return $ldap;
 }
 
 ###############################################################################
@@ -426,119 +421,108 @@ sub lookup_update {
 
 Bugzilla->usage_mode(Bugzilla::Constants::USAGE_MODE_CMDLINE);
 
-$logger->info(
-	"Connecting to: " .
-	$cfg->get("ldapserver") .
-	" (" .
-	$cfg->get("ldapport") .
-	")"
-);
-
-my $ldap = Net::LDAP->new(
-	$cfg->get("ldapserver"),
-	port => $cfg->get("ldapport"),
-) or $logger->logdie("$@");
-
-#
-# LDAP bind: named or anonymous bind.
-#
-# \TODO: not tested with anonymous bind.
-#
-my $mesg;
-
-if($cfg->get("binduser")) {
-	$logger->info("Connecting to LDAP/AD server as: " . $cfg->get("binduser"));
-	$mesg = $ldap->bind(
-		$cfg->get("binduser"),
-		password => $cfg->get("bindpass")
-	);
-}
-else {
-	$logger->info("Connecting to LDAP/AD server anonymously");
-	$mesg = $ldap->bind();
-}
-
-_check_ldap_answer($mesg);
-
-#
-# Search:
-#
-
-$logger->info("Searching for users, using the following attributes:");
-$logger->info("   UID...........: " . $cfg->get("ldapuid"));
-$logger->info("   NAME..........: " . $cfg->get("ldapname"));
-$logger->info("   EMAIL.........: " . $cfg->get("ldapmail"));
-
-$logger->info("Using the filter.: " . $cfg->get("ldapfilter"));
-$logger->info("Using the basedn.: " . $cfg->get("basedn"));
-
-my $attrlist = [
-	$cfg->get("ldapuid"),
-	$cfg->get("ldapname"),
-	$cfg->get("ldapmail"),
-];
-
-my $page = Net::LDAP::Control::Paged->new(size => $cfg->get("pagesize"));
-my $cookie;
-my @processed=();
-my $added=0;
-my $skipped=0;
+my @processed    = ();
 my @invalidusers = ();
+my $added        = 0;
+my $skipped      = 0;
 
-while (1) {
-	if($cfg->get('allattr')) {
-		$mesg = $ldap->search(
-			base   => $cfg->get("basedn"),
-			filter => $cfg->get("ldapfilter"),
-			control => [$page]
-		);
-	}
-	else {
-		$mesg = $ldap->search(
-			base   => $cfg->get("basedn"),
-			filter => $cfg->get("ldapfilter"),
-			attrs => $attrlist,
-			control => [$page]
-		);
-	}
+foreach my $ldapcfgname ( @{$cfg->get("ldapcfg")} ) {
+	
+	my $ldapcfg = AppConfig->new({
+		CASE     => 1,
+		CREATE   => 1,
+		PEDANTIC => 1,
+	});
+	$ldapcfg->define(%ldap_cfg);
 
-	_check_ldap_answer($mesg);
+	$logger->info("Loading LDAP configuration from file: '$ldapcfgname'");
+	$ldapcfg->file($ldapcfgname);
+	
+	my $ldapconn = ldap_connect(
+		$ldapcfg->get("ldapserver"),
+		$ldapcfg->get("ldapport"),
+		$ldapcfg->get("binduser"),
+		$ldapcfg->get("bindpass"),
+	);
 
-	while (my $adentry = $mesg->pop_entry()) {
-		push(@processed, lc($adentry->get_value($cfg->get("ldapmail"))));
+	#
+	# Search:
+	#
 
-		if($cfg->get('dumponly')) {
-			$logger->info(
-				"*********************" .
-				$adentry->get_value($cfg->get("ldapuid")) .
-				"******************************"
+	$logger->info("Searching for users, using the following attributes:");
+	$logger->info("   UID...........: " . $ldapcfg->get("ldapuid"));
+	$logger->info("   NAME..........: " . $ldapcfg->get("ldapname"));
+	$logger->info("   EMAIL.........: " . $ldapcfg->get("ldapmail"));
+
+	$logger->info("Using the filter.: " . $ldapcfg->get("ldapfilter"));
+	$logger->info("Using the basedn.: " . $ldapcfg->get("basedn"));
+
+	my $attrlist = [
+		$ldapcfg->get("ldapuid"),
+		$ldapcfg->get("ldapname"),
+		$ldapcfg->get("ldapmail"),
+	];
+
+	my $page = Net::LDAP::Control::Paged->new(size => $ldapcfg->get("pagesize"));
+	my $cookie;
+	
+	while (1) {
+		my $mesg;
+		if($cfg->get('allattr')) {
+			$mesg = $ldapconn->search(
+				base   => $ldapcfg->get("basedn"),
+				filter => $ldapcfg->get("ldapfilter"),
+				control => [$page]
 			);
-			$adentry->dump;
-			$logger->info("***************************************************************");
 		}
 		else {
-			lookup_update($adentry, \$added, \$skipped, \@invalidusers)
+			$mesg = $ldapconn->search(
+				base   => $ldapcfg->get("basedn"),
+				filter => $ldapcfg->get("ldapfilter"),
+				attrs => $attrlist,
+				control => [$page]
+			);
 		}
+	
+		_check_ldap_answer($mesg);
+	
+		while (my $adentry = $mesg->pop_entry()) {
+			push(@processed, lc($adentry->get_value($ldapcfg->get("ldapmail"))));
+	
+			if($cfg->get('dumponly')) {
+				$logger->info(
+					"*********************" .
+					$adentry->get_value($ldapcfg->get("ldapuid")) .
+					"******************************"
+				);
+				$adentry->dump;
+				$logger->info("***************************************************************");
+			}
+			else {
+				lookup_update($adentry, \$added, \$skipped, \@invalidusers, $ldapcfg)
+			}
+		}
+	
+		my ($resp) = $mesg->control(LDAP_CONTROL_PAGED) or last;
+		$cookie    = $resp->cookie or last;
+		# Paging Control
+		$page->cookie($cookie);
+	}
+	
+	if ($cookie) {
+		# Abnormal exit, so let the server know we do not want any more
+		$page->cookie($cookie);
+		$page->size(0);
+		$ldapconn->search(control => [$page]);
+		$logger->logdie("abnormal exit");
 	}
 
-	my ($resp) = $mesg->control(LDAP_CONTROL_PAGED) or last;
-	$cookie    = $resp->cookie or last;
-	# Paging Control
-	$page->cookie($cookie);
-}
+	#
+	# Unbind, disconnect and say goodbye...
+	#
+	$ldapconn->unbind();
 
-if ($cookie) {
-	# Abnormal exit, so let the server know we do not want any more
-	$page->cookie($cookie);
-	$page->size(0);
-	$ldap->search(control => [$page]);
-	$logger->logdie("abnormal exit");
 }
-
-#
-# Unbind, disconnect and say goodbye...
-#
-$ldap->unbind();
 
 $logger->info("Checking Bugzilla users database (find disabled users)");
 
