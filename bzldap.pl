@@ -230,6 +230,11 @@ my %config_cfg = (
 		ARGS     => '=s',
 		ARGCOUNT => AppConfig::ARGCOUNT_ONE,
 	},
+	'pagesize' => {
+		DEFAULT  => 500,
+		ARGS     => '=i',
+		ARGCOUNT => AppConfig::ARGCOUNT_ONE,
+	},
 	'verbose' => {
 		DEFAULT  => 0,
 		ARGS     => '+',
@@ -473,7 +478,7 @@ my $attrlist = [
 	$cfg->get("ldapmail"),
 ];
 
-my $page = Net::LDAP::Control::Paged->new(size => 999);
+my $page = Net::LDAP::Control::Paged->new(size => $cfg->get("pagesize"));
 my $cookie;
 my @processed=();
 my $added=0;
@@ -537,7 +542,7 @@ $ldap->unbind();
 
 $logger->info("Checking Bugzilla users database (find disabled users)");
 
-my $localusers = lc($cfg->get("localuser"));
+my $localusers = $cfg->get("localuser");
 
 foreach my $bu (Bugzilla::User->get_all()) {
 	my $username = lc($bu->email());
