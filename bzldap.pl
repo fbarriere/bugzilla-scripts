@@ -48,6 +48,7 @@ $| = 1;
 # Used packages:
 #
 use Cwd;
+use POSIX qw(strftime);
 
 use Log::Log4perl;
 use Log::Log4perl::Layout;
@@ -341,8 +342,6 @@ sub lookup_update {
 	
 	my $account_disable = $uacvalue & $uacmask;
 	
-	$account_disable && $logger->warn("User $username, is disabled");
-		
 	$logger->debug("Looking for: '$usermail' ($userid) ($account_disable)");
 
 	my $bzuser = Bugzilla::Object::match("Bugzilla::User", {login_name => "$usermail"});
@@ -373,6 +372,8 @@ sub lookup_update {
 		}
 		else {
 			$logger->warn("Creating new user: $usermail ($userid / $username)");
+			$logger->warn("User $usermail, is disabled") if $account_disable;
+			
 			unless($cfg->get("norun")) {
 				if ( $usermail =~ /^[\w\.\-]+@[\w\.\-]+$/ ) {
 					my $nu = Bugzilla::User->create({
@@ -539,6 +540,8 @@ foreach my $ldapcfgname ( @{$cfg->get("ldapcfg")} ) {
 $logger->info("Checking Bugzilla users database (find disabled users)");
 
 my $localusers = $cfg->get("localuser");
+my $timestamp  = strftime "%c", localtime;
+my @disabled   = ();
 
 foreach my $bu (Bugzilla::User->get_all()) {
 	my $username = lc($bu->email());
@@ -547,10 +550,28 @@ foreach my $bu (Bugzilla::User->get_all()) {
 			$logger->info("Skipping local-only user: '$username'.");
 		}
 		elsif($bu->disabledtext()) {
-			$logger->info("User '$username', already disabled");
+			$logger->debug("User '$username', already disabled");
 		}
 		else {
-			$logger->warn("User '$username' not found; Disable it.");
+			my $responsabilities = $bu->product_responsibilities();
+			if( @{$responsabilities} ) {
+				foreach my $component ( @{$responsabilities->[0]->{'components'}} ) {
+					$logger->error("User '$username' is responsible for: " . 
+						$component->product()->classification()->name() . 
+						"/" . 
+						$component->product()->name() . 
+						"/" . 
+						$component->name() );
+				}
+			}
+			else {
+				$logger->warn("Disabling user: '$username'");
+				push(@disabled, $username);
+				unless($cfg->get("norun")) {
+					$bu->set_disabledtext("Disabled as not found in reference AD. $timestamp");
+					$bu->update();
+				}
+			}
 		}
 	}
 }
@@ -561,4 +582,8 @@ $logger->info("Skipped $skipped already defined users");
 $logger->info("Dropped " . scalar(@invalidusers) . " invalid users");
 foreach my $invalid ( @invalidusers ) {
 	$logger->info("   Invalid address: '$invalid'");
+}
+$logger->info("Disabled " . scalar(@disabled) . " users");
+foreach my $disabled (@disabled) {
+	$logger->info("   $disabled");
 }
