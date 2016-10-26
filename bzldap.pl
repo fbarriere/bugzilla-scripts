@@ -189,6 +189,11 @@ my %ldap_cfg = (
 		ARGS     => '=s',
 		ARGCOUNT => AppConfig::ARGCOUNT_ONE,
 	},
+	'uacfield' => {
+		DEFAULT  => 'userAccountControl',
+		ARGS     => '=s',
+		ARGCOUNT => AppConfig::ARGCOUNT_ONE,
+	},
 	'pagesize' => {
 		DEFAULT  => 500,
 		ARGS     => '=i',
@@ -331,8 +336,14 @@ sub lookup_update {
 	my $usermail = $ldapuser->get_value($ldapcfg->get("ldapmail"));
 	my $userid   = $ldapuser->get_value($ldapcfg->get("ldapuid"));
 	my $username = $ldapuser->get_value($ldapcfg->get("ldapname"));
+	my $uacvalue = $ldapuser->get_value($ldapcfg->get("uacfield"));
+	my $uacmask  = 2;
 	
-	$logger->debug("Looking for: '$usermail'");
+	my $account_disable = $uacvalue & $uacmask;
+	
+	$account_disable && $logger->warn("User $username, is disabled");
+		
+	$logger->debug("Looking for: '$usermail' ($userid) ($account_disable)");
 
 	my $bzuser = Bugzilla::Object::match("Bugzilla::User", {login_name => "$usermail"});
 	scalar(@{$bzuser}) <= 1 or $logger->logdie("Error, more than 1 user match: \n" . dumper($bzuser));
@@ -461,6 +472,7 @@ foreach my $ldapcfgname ( @{$cfg->get("ldapcfg")} ) {
 		$ldapcfg->get("ldapuid"),
 		$ldapcfg->get("ldapname"),
 		$ldapcfg->get("ldapmail"),
+		$ldapcfg->get("uacfield"),
 	];
 
 	my $page = Net::LDAP::Control::Paged->new(size => $ldapcfg->get("pagesize"));
