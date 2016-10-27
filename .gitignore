@@ -1,2 +1,7 @@
 .project
 .remote-sync.json
+.vagrant
+/bzldap-atmel.cfg
+/bzldap-microchip.cfg
+/updateusers.sh
+/bzldap.cfg
