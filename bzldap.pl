@@ -195,6 +195,11 @@ my %ldap_cfg = (
 		ARGS     => '=s',
 		ARGCOUNT => AppConfig::ARGCOUNT_ONE,
 	},
+	'uacmask' => {
+		DEFAULT  => 0,
+		ARGS     => '=d',
+		ARGCOUNT => AppConfig::ARGCOUNT_ONE,
+	},
 	'pagesize' => {
 		DEFAULT  => 500,
 		ARGS     => '=i',
@@ -338,9 +343,15 @@ sub lookup_update {
 	my $userid   = $ldapuser->get_value($ldapcfg->get("ldapuid"));
 	my $username = $ldapuser->get_value($ldapcfg->get("ldapname"));
 	my $uacvalue = $ldapuser->get_value($ldapcfg->get("uacfield"));
-	my $uacmask  = 2;
+	my $uacmask  = $ldapuser->get_value($ldapcfg->get("uacmask"));
+	my $account_disable;
 	
-	my $account_disable = $uacvalue & $uacmask;
+	if($uacmask) {
+		$account_disable = $uacvalue & $uacmask;
+	}
+	else {
+		$account_disable = $uacvalue;
+	};
 	
 	$logger->debug("Looking for: '$usermail' ($userid) ($account_disable)");
 
