@@ -88,6 +88,10 @@ This second address will be used to set/change the assignee field.
 If only a single address is provided, the matches are reported and nothing
 is changed in the Bugzilla database.
 
+=item --component=<component-name>
+
+Limit the changes to the named component.
+
 =item --cclist_from=<original-cclist-member>
 
 The Email address to search for in the cc_list field.
@@ -132,6 +136,11 @@ my %config_cfg = (
 		ARGCOUNT => AppConfig::ARGCOUNT_ONE,
 	},
 	'cclist_to' => {
+		DEFAULT  => undef,
+		ARGS     => '=s',
+		ARGCOUNT => AppConfig::ARGCOUNT_ONE,
+	},
+	'component' => {
 		DEFAULT  => undef,
 		ARGS     => '=s',
 		ARGCOUNT => AppConfig::ARGCOUNT_ONE,
@@ -285,11 +294,12 @@ if ( $cfg->get("cclist_to") ) {
 #
 # TODO:
 #   - Add a project filter to only run on a specific project.
-#   - Add a component filter to only run on a specific component.
 #
 my @components = Bugzilla::Component->get_all();
 
 $logger->info("Found " . scalar(@components) . " components");
+
+my $only_component = $cfg->get("component");
 
 #
 # Loop over the components, report (and change) the following:
@@ -301,6 +311,7 @@ $logger->info("Found " . scalar(@components) . " components");
 # are not case sensitive...
 #
 foreach my $component ( @components ) {
+	next if ( $only_component and $only_component ne $component->name);
 	if ( $assignee_from and lc($assignee_from->login) eq lc($component->default_assignee->login) ) {
 		$logger->info("   Changing assignee for component: " . $component->product()->name . "/" . $component->name);
 		$logger->info("      From........................: " . $component->default_assignee->login);
@@ -313,40 +324,37 @@ foreach my $component ( @components ) {
 		}
 	}
 
-	if ( $cclist_from ) {
-		my $old_cclist = join( ", ", map { $_->login; } @{$component->initial_cc} );
-		my @new_cclist;
-		my $changed = 0;
-
-		foreach my $member ( @{$component->initial_cc} ) {
-	    	if ( lc($cclist_from->login) eq lc($member->login) ) {
-				$changed++;
-				if ( $cclist_to ) {
-					$logger->debug("Replacing " . $member->login . " by " . $cclist_to->login);
-					unless ( grep { $cclist_to->login eq $_ } @new_cclist ) {
-						push( @new_cclist, $cclist_to->login );
-					}
-				}
-				else {
-					$logger->debug("Removing member " . $member->login);
-				}
+	my $old_cclist = join( ", ", map { $_->login; } @{$component->initial_cc} );
+	my @new_cclist;
+	my $changed = 0;
+	
+	foreach my $member ( @{$component->initial_cc} ) {
+    	if ( $cclist_from and ( lc($cclist_from->login) eq lc($member->login) ) ) {
+			$changed++;
+			$logger->debug("Removing member " . $member->login);
+		}
+		else {
+			unless ( grep { $member->login eq $_ } @new_cclist ) {
+				push (@new_cclist, $member->login );
 			}
-			else {
-				unless ( grep { $member->login eq $_ } @new_cclist ) {
-					push (@new_cclist, $member->login );
-				}
-			}
-	    }
+		}
+    }
+	if ( $cclist_to ) {
+		unless ( grep { $cclist_to->login eq $_ } @new_cclist ) {
+			$logger->debug("Adding to cc_list: " . $cclist_to->login );
+			$changed++;
+			push (@new_cclist, $cclist_to->login );
+		}
+	}
+	
+	if ( $changed ) {
+		$logger->info("   Changing cc_list for component.: " . $component->product()->name . "/" . $component->name);
+		$logger->info("      Old CC_list.................: " . $old_cclist);
+		$logger->info("      New CC_list.................: " . join(", ", @new_cclist) );
 
-		if ( $changed ) {
-			$logger->info("   Changing cc_list for component.: " . $component->product()->name . "/" . $component->name);
-			$logger->info("      Old CC_list.................: " . $old_cclist);
-			$logger->info("      New CC_list.................: " . join(", ", @new_cclist) );
-
-			unless ( $cfg->get("noupdate") ) {
-				$component->set_cc_list(\@new_cclist);
-				$component->update();
-			}
+		unless ( $cfg->get("noupdate") ) {
+			$component->set_cc_list(\@new_cclist);
+			$component->update();
 		}
 	}
 }
